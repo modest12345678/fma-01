@@ -1,387 +1,379 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync as readUtf8File } from 'node:fs';
 
-export type Wire = 'openai' | 'anthropic' | 'gemini';
-export type AuthScheme = 'bearer' | 'x-api-key' | 'x-goog-api-key' | 'none';
+export type Wire = 'openai' | 'anthropic' | 'gemini'; // upstream wire protocol
+export type AuthScheme = 'bearer' | 'x-api-key' | 'x-goog-api-key' | 'none'; // upstream auth header kind
 
-export const PROVIDERS_SCHEMA = 'free-model-aggregator-01/providers/v1';
-export const RATINGS_SCHEMA = 'free-model-aggregator-01/ratings/v1';
-export const WORKLOAD_SCHEMA = 'free-model-aggregator-01/workload/v1';
+export const PROVIDERS_SCHEMA = 'free-model-aggregator-01/providers/v1'; // directory schema id
+export const RATINGS_SCHEMA = 'free-model-aggregator-01/ratings/v1'; // ratings schema id
+export const WORKLOAD_SCHEMA = 'free-model-aggregator-01/workload/v1'; // workload schema id
 
-export type Json = Record<string, unknown>;
-export const isRecord = (v: unknown): v is Json => v !== null && typeof v === 'object' && !Array.isArray(v);
+export type Json = Record<string, unknown>; // generic json object record
+export const isRecord = (val: unknown): val is Json => val !== null && typeof val === 'object' && !Array.isArray(val);
 
 export interface ProviderDirectoryEntry {
-  id: string;
-  name: string;
-  wire: Wire;
-  auth: AuthScheme;
-  base: string;
-  key_env: string;
-  key: string;
+  id: string; // provider identifier
+  name: string; // display label
+  wire: Wire; // protocol kind
+  auth: AuthScheme; // credential scheme
+  base: string; // endpoint base path
+  key_env: string; // env variable name
+  key: string; // resolved api token
 }
 
 export interface ProviderDirectory {
-  schema: string;
-  providers: ProviderDirectoryEntry[];
+  schema: string; // directory document schema
+  providers: ProviderDirectoryEntry[]; // parsed provider list
 }
 
 export interface CatalogModel {
-  id: string;
-  free: boolean;
-  context_length: number | null;
+  id: string; // model slug
+  free: boolean; // zero-cost flag
+  context_length: number | null; // token window size
 }
 
 export interface CatalogProvider {
-  id: string;
-  base_url: string;
-  key_env: string;
-  wire: Wire;
-  models: CatalogModel[];
+  id: string; // catalog provider id
+  base_url: string; // catalog base url
+  key_env: string; // catalog key env
+  wire: Wire; // catalog wire type
+  models: CatalogModel[]; // discovered models
 }
 
 export interface CatalogReport {
-  providers: CatalogProvider[];
+  providers: CatalogProvider[]; // full catalog payload
 }
 
 export interface RatingRow {
-  model: string;
-  provider: string;
-  rating_milli: number;
-  context_length: number | null;
-  tools: boolean;
-  vision: boolean;
-  json: boolean;
-  free: boolean;
+  model: string; // rated model id
+  provider: string; // rated provider id
+  rating_milli: number; // milli-elo score
+  context_length: number | null; // rated token window
+  tools: boolean; // supports tool use
+  vision: boolean; // supports image input
+  json: boolean; // supports json output
+  free: boolean; // rated free tier
 }
 
 export interface RatingsFile {
-  schema: string;
-  ratings: RatingRow[];
-  best: { id: string; rating_milli: number }[];
+  schema: string; // ratings document schema
+  ratings: RatingRow[]; // model rating entries
+  best: { id: string; rating_milli: number }[]; // per-request ceiling
 }
 
 export interface Requirement {
-  tools?: boolean;
-  vision?: boolean;
-  json?: boolean;
-  min_context?: number;
+  tools?: boolean; // requires function calling
+  vision?: boolean; // requires image understanding
+  json?: boolean; // requires structured json
+  min_context?: number; // minimum token context
 }
 
 export interface WorkloadRequest {
-  id: string;
-  api: 'openai' | 'anthropic';
-  stream: boolean;
-  weight: 1 | 2;
-  requires: Requirement;
+  id: string; // workload request id
+  api: 'openai' | 'anthropic'; // client wire dialect
+  stream: boolean; // sse streaming flag
+  weight: 1 | 2; // scoring weight multiplier
+  requires: Requirement; // capability constraints
 }
 
 export interface WorkloadFile {
-  schema: string;
-  manifest: WorkloadRequest[];
+  schema: string; // workload document schema
+  manifest: WorkloadRequest[]; // ordered workload items
 }
 
 export interface Brief {
-  directory: ProviderDirectory;
-  ratings: RatingsFile | null;
-  workload: WorkloadFile | null;
-  error: string | null;
+  directory: ProviderDirectory; // parsed directory doc
+  ratings: RatingsFile | null; // parsed ratings doc
+  workload: WorkloadFile | null; // parsed workload doc
+  error: string | null; // brief load diagnostic
 }
 
 export interface ProbedModel {
-  id: string;
-  display_name: string;
-  free: boolean | null;
-  context_length: number | null;
-  tools: boolean | null;
-  vision: boolean | null;
-  json: boolean | null;
+  id: string; // probed model slug
+  display_name: string; // human readable name
+  free: boolean | null; // probed free status
+  context_length: number | null; // probed context limit
+  tools: boolean | null; // probed tool support
+  vision: boolean | null; // probed vision support
+  json: boolean | null; // probed json support
 }
 
 export interface Probe {
-  provider: ProviderDirectoryEntry;
-  ok: boolean;
-  status: number;
-  models: ProbedModel[];
-  error: string | null;
+  provider: ProviderDirectoryEntry; // target provider entry
+  ok: boolean; // probe succeeded flag
+  status: number; // http status code
+  models: ProbedModel[]; // probed model list
+  error: string | null; // probe error message
 }
 
 export interface Capabilities {
-  context_length: number | null;
-  tools: boolean | null;
-  vision: boolean | null;
-  json: boolean | null;
+  context_length: number | null; // effective context window
+  tools: boolean | null; // effective tool capability
+  vision: boolean | null; // effective vision capability
+  json: boolean | null; // effective json capability
 }
 
-export function joinBase(envUrl: string, base: string): string {
-  const b = base.trim();
-  if (/^https?:\/\//i.test(b)) return b.replace(/\/+$/, '');
-  const prefix = envUrl.replace(/\/+$/, '');
-  if (b === '') return prefix;
-  return `${prefix}${b.startsWith('/') ? '' : '/'}${b.replace(/\/+$/, '')}`;
+export function joinBase(envOrigin: string, rawBase: string): string {
+  const trimmedBase = rawBase.trim();
+  if (/^https?:\/\//i.test(trimmedBase)) return trimmedBase.replace(/\/+$/, '');
+  const cleanPrefix = envOrigin.replace(/\/+$/, '');
+  if (trimmedBase === '') return cleanPrefix;
+  return `${cleanPrefix}${trimmedBase.startsWith('/') ? '' : '/'}${trimmedBase.replace(/\/+$/, '')}`;
 }
 
-export function authHeaders(auth: AuthScheme, key: string): Record<string, string> {
-  if (key === '') return {};
-  if (auth === 'bearer') return { authorization: `Bearer ${key}` };
-  if (auth === 'x-api-key') return { 'x-api-key': key };
-  if (auth === 'x-goog-api-key') return { 'x-goog-api-key': key };
-  return {};
+export function authHeaders(scheme: AuthScheme, secretKey: string): Record<string, string> {
+  if (secretKey === '') return {}; // omit empty credentials
+  if (scheme === 'bearer') return { authorization: `Bearer ${secretKey}` };
+  if (scheme === 'x-api-key') return { 'x-api-key': secretKey };
+  if (scheme === 'x-goog-api-key') return { 'x-goog-api-key': secretKey };
+  return {}; // no auth header required
 }
 
-function documentsIn(text: string): Json[] {
-  const out: Json[] = [];
-  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    const end = objectEnd(text, start);
-    if (end === -1) continue;
+function extractDocs(rawMarkdown: string): Json[] {
+  const docsFound: Json[] = [];
+  for (let openIdx = rawMarkdown.indexOf('{'); openIdx !== -1; openIdx = rawMarkdown.indexOf('{', openIdx + 1)) {
+    const closeIdx = findClosingBrace(rawMarkdown, openIdx);
+    if (closeIdx === -1) continue; // unbalanced brace
     try {
-      const value: unknown = JSON.parse(text.slice(start, end + 1));
-      if (isRecord(value) && typeof value.schema === 'string') out.push(value);
+      const parsedObj: unknown = JSON.parse(rawMarkdown.slice(openIdx, closeIdx + 1));
+      if (isRecord(parsedObj) && typeof parsedObj.schema === 'string') docsFound.push(parsedObj);
     } catch {
-      // Continue scanning.
+      // ignore non-json blocks
     }
   }
-  return out;
+  return docsFound;
 }
 
-function objectEnd(text: string, start: number): number {
-  let depth = 0;
-  let inString = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (ch === '\\') i += 1;
-      else if (ch === '"') inString = false;
-    } else if (ch === '"') inString = true;
-    else if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return i;
+function findClosingBrace(rawMarkdown: string, startOffset: number): number {
+  let braceDepth = 0;
+  let insideQuotes = false;
+  for (let pos = startOffset; pos < rawMarkdown.length; pos++) {
+    const glyph = rawMarkdown[pos];
+    if (insideQuotes) {
+      if (glyph === '\\') pos += 1;
+      else if (glyph === '"') insideQuotes = false;
+    } else if (glyph === '"') insideQuotes = true;
+    else if (glyph === '{') braceDepth += 1;
+    else if (glyph === '}') {
+      braceDepth -= 1;
+      if (braceDepth === 0) return pos;
     }
   }
-  return -1;
+  return -1; // no matching brace
 }
 
-function stringOf(v: unknown): string {
-  return typeof v === 'string' ? v : '';
+const asStr = (val: unknown): string => (typeof val === 'string' ? val : '');
+const asNum = (val: unknown): number | null => (typeof val === 'number' && Number.isFinite(val) ? val : null);
+const asBool = (val: unknown): boolean | null => (typeof val === 'boolean' ? val : null);
+
+function decodeProvider(item: unknown): ProviderDirectoryEntry | null {
+  if (!isRecord(item)) return null; // require json object
+  const provId = asStr(item.id);
+  const provWire = item.wire === 'openai' || item.wire === 'anthropic' || item.wire === 'gemini' ? item.wire : null;
+  if (provId === '' || provWire === null) return null;
+  const provAuth = item.auth === 'bearer' || item.auth === 'x-api-key' || item.auth === 'x-goog-api-key' || item.auth === 'none' ? item.auth : 'bearer';
+  const provBase = asStr(item.path) || asStr(item.base_path) || asStr(item.base_url) || asStr(item.base);
+  return { id: provId, name: asStr(item.name) || provId, wire: provWire, auth: provAuth, base: provBase, key_env: asStr(item.key_env), key: asStr(item.key) };
 }
 
-function numberOrNull(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null;
-}
-
-function boolOrNull(v: unknown): boolean | null {
-  return typeof v === 'boolean' ? v : null;
-}
-
-function providerOf(v: unknown): ProviderDirectoryEntry | null {
-  if (!isRecord(v)) return null;
-  const id = stringOf(v.id);
-  const wire = v.wire === 'openai' || v.wire === 'anthropic' || v.wire === 'gemini' ? v.wire : null;
-  if (id === '' || wire === null) return null;
-  const auth = v.auth === 'bearer' || v.auth === 'x-api-key' || v.auth === 'x-goog-api-key' || v.auth === 'none' ? v.auth : 'bearer';
-  const base =
-    stringOf(v.path) !== '' ? stringOf(v.path) : stringOf(v.base_path) !== '' ? stringOf(v.base_path) : stringOf(v.base_url) !== '' ? stringOf(v.base_url) : stringOf(v.base);
-  return { id, name: stringOf(v.name) !== '' ? stringOf(v.name) : id, wire, auth, base, key_env: stringOf(v.key_env), key: stringOf(v.key) };
-}
-
-function ratingOf(v: unknown): RatingRow | null {
-  if (!isRecord(v)) return null;
-  const model = stringOf(v.model);
-  const provider = stringOf(v.provider);
-  if (model === '' || provider === '') return null;
+function decodeRating(item: unknown): RatingRow | null {
+  if (!isRecord(item)) return null; // require rating object
+  const modelSlug = asStr(item.model);
+  const provSlug = asStr(item.provider);
+  if (modelSlug === '' || provSlug === '') return null;
   return {
-    model,
-    provider,
-    rating_milli: typeof v.rating_milli === 'number' && Number.isFinite(v.rating_milli) ? v.rating_milli : 0,
-    context_length: numberOrNull(v.context_length),
-    tools: v.tools === true,
-    vision: v.vision === true,
-    json: v.json === true,
-    free: v.free === true,
+    model: modelSlug,
+    provider: provSlug,
+    rating_milli: typeof item.rating_milli === 'number' && Number.isFinite(item.rating_milli) ? item.rating_milli : 0,
+    context_length: asNum(item.context_length),
+    tools: item.tools === true,
+    vision: item.vision === true,
+    json: item.json === true,
+    free: item.free === true,
   };
 }
 
-function workloadRequestOf(v: unknown): WorkloadRequest | null {
-  if (!isRecord(v)) return null;
-  const id = stringOf(v.id);
-  if (id === '') return null;
-  const requires = isRecord(v.requires) ? v.requires : {};
+function decodeWorkloadItem(item: unknown): WorkloadRequest | null {
+  if (!isRecord(item)) return null; // require workload object
+  const reqId = asStr(item.id);
+  if (reqId === '') return null;
+  const reqCaps = isRecord(item.requires) ? item.requires : {};
   return {
-    id,
-    api: v.api === 'anthropic' ? 'anthropic' : 'openai',
-    stream: v.stream === true,
-    weight: v.weight === 2 ? 2 : 1,
+    id: reqId,
+    api: item.api === 'anthropic' ? 'anthropic' : 'openai',
+    stream: item.stream === true,
+    weight: item.weight === 2 ? 2 : 1,
     requires: {
-      tools: requires.tools === true,
-      vision: requires.vision === true,
-      json: requires.json === true,
-      ...(typeof requires.min_context === 'number' && Number.isFinite(requires.min_context) ? { min_context: requires.min_context } : {}),
+      tools: reqCaps.tools === true,
+      vision: reqCaps.vision === true,
+      json: reqCaps.json === true,
+      ...(typeof reqCaps.min_context === 'number' && Number.isFinite(reqCaps.min_context) ? { min_context: reqCaps.min_context } : {}),
     },
   };
 }
 
-export function readBrief(path: string): Brief {
-  const directory: ProviderDirectory = { schema: PROVIDERS_SCHEMA, providers: [] };
-  if (path === '') return { directory, ratings: null, workload: null, error: 'MAKEFUN_PROMPT_FILE is not set' };
-  let text: string;
+export function readBrief(briefPath: string): Brief {
+  const emptyDir: ProviderDirectory = { schema: PROVIDERS_SCHEMA, providers: [] };
+  if (briefPath === '') return { directory: emptyDir, ratings: null, workload: null, error: 'MAKEFUN_PROMPT_FILE is not set' };
+  let rawContent: string;
   try {
-    text = readFileSync(path, 'utf8');
+    rawContent = readUtf8File(briefPath, 'utf8');
   } catch (err) {
-    return { directory, ratings: null, workload: null, error: `cannot read ${path}: ${(err as Error).message}` };
+    return { directory: emptyDir, ratings: null, workload: null, error: `cannot read ${briefPath}: ${(err as Error).message}` };
   }
-  const docs = documentsIn(text);
-  const directoryDoc = docs.find((d) => d.schema === PROVIDERS_SCHEMA && Array.isArray(d.providers)) ?? null;
-  if (directoryDoc === null || !Array.isArray(directoryDoc.providers)) {
-    return { directory, ratings: null, workload: null, error: `the brief at ${path} holds no ${PROVIDERS_SCHEMA} document` };
+  const allDocs = extractDocs(rawContent);
+  const dirDoc = allDocs.find((doc) => doc.schema === PROVIDERS_SCHEMA && Array.isArray(doc.providers)) ?? null;
+  if (dirDoc === null || !Array.isArray(dirDoc.providers)) {
+    return { directory: emptyDir, ratings: null, workload: null, error: `the brief at ${briefPath} holds no ${PROVIDERS_SCHEMA} document` };
   }
-  const providers = directoryDoc.providers.flatMap((v) => {
-    const p = providerOf(v);
-    return p === null ? [] : [p];
+  const parsedProviders = dirDoc.providers.flatMap((entry) => {
+    const decoded = decodeProvider(entry);
+    return decoded === null ? [] : [decoded];
   });
-  const ratingsDoc = docs.find((d) => d.schema === RATINGS_SCHEMA && Array.isArray(d.ratings)) ?? null;
-  const ratingRows = ratingsDoc !== null && Array.isArray(ratingsDoc.ratings) ? ratingsDoc.ratings : null;
-  const ratings: RatingsFile | null =
-    ratingsDoc === null || ratingRows === null
+  const rateDoc = allDocs.find((doc) => doc.schema === RATINGS_SCHEMA && Array.isArray(doc.ratings)) ?? null;
+  const rawRatings = rateDoc !== null && Array.isArray(rateDoc.ratings) ? rateDoc.ratings : null;
+  const parsedRatings: RatingsFile | null =
+    rateDoc === null || rawRatings === null
       ? null
       : {
           schema: RATINGS_SCHEMA,
-          ratings: ratingRows.flatMap((v) => {
-            const r = ratingOf(v);
-            return r === null ? [] : [r];
+          ratings: rawRatings.flatMap((entry) => {
+            const decoded = decodeRating(entry);
+            return decoded === null ? [] : [decoded];
           }),
-          best: Array.isArray(ratingsDoc.best)
-            ? ratingsDoc.best.flatMap((v) => {
-                if (!isRecord(v) || stringOf(v.id) === '') return [];
-                return [{ id: stringOf(v.id), rating_milli: numberOrNull(v.rating_milli) ?? 0 }];
+          best: Array.isArray(rateDoc.best)
+            ? rateDoc.best.flatMap((entry) => {
+                if (!isRecord(entry) || asStr(entry.id) === '') return [];
+                return [{ id: asStr(entry.id), rating_milli: asNum(entry.rating_milli) ?? 0 }];
               })
             : [],
         };
-  const workloadDoc = docs.find((d) => d.schema === WORKLOAD_SCHEMA && Array.isArray(d.manifest)) ?? null;
-  const workload: WorkloadFile | null =
-    workloadDoc === null || !Array.isArray(workloadDoc.manifest)
+  const workDoc = allDocs.find((doc) => doc.schema === WORKLOAD_SCHEMA && Array.isArray(doc.manifest)) ?? null;
+  const parsedWorkload: WorkloadFile | null =
+    workDoc === null || !Array.isArray(workDoc.manifest)
       ? null
       : {
           schema: WORKLOAD_SCHEMA,
-          manifest: workloadDoc.manifest.flatMap((v) => {
-            const w = workloadRequestOf(v);
-            return w === null ? [] : [w];
+          manifest: workDoc.manifest.flatMap((entry) => {
+            const decoded = decodeWorkloadItem(entry);
+            return decoded === null ? [] : [decoded];
           }),
         };
-  return { directory: { schema: PROVIDERS_SCHEMA, providers }, ratings, workload, error: null };
+  return { directory: { schema: PROVIDERS_SCHEMA, providers: parsedProviders }, ratings: parsedRatings, workload: parsedWorkload, error: null };
 }
 
-export function ratingOfModel(ratings: RatingsFile | null, providerId: string, modelId: string): RatingRow | null {
-  if (ratings === null) return null;
-  return ratings.ratings.find((r) => r.provider === providerId && r.model === modelId) ?? null;
+export function ratingOfModel(ratingsFile: RatingsFile | null, provId: string, modelId: string): RatingRow | null {
+  if (ratingsFile === null) return null; // no ratings loaded
+  return ratingsFile.ratings.find((row) => row.provider === provId && row.model === modelId) ?? null;
 }
 
-export function modelFree(model: ProbedModel, row: RatingRow | null): boolean {
-  if (row !== null) return row.free;
-  return model.free ?? false;
+export function modelFree(probed: ProbedModel, rateRow: RatingRow | null): boolean {
+  if (rateRow !== null) return rateRow.free; // prefer rating table free flag
+  return probed.free ?? false;
 }
 
-export function capabilitiesOf(model: ProbedModel, row: RatingRow | null): Capabilities {
+export function capabilitiesOf(probed: ProbedModel, rateRow: RatingRow | null): Capabilities {
   return {
-    context_length: row?.context_length ?? model.context_length ?? null,
-    tools: row?.tools ?? model.tools ?? null,
-    vision: row?.vision ?? model.vision ?? null,
-    json: row?.json ?? model.json ?? null,
+    context_length: rateRow?.context_length ?? probed.context_length ?? null,
+    tools: rateRow?.tools ?? probed.tools ?? null,
+    vision: rateRow?.vision ?? probed.vision ?? null,
+    json: rateRow?.json ?? probed.json ?? null,
   };
 }
 
-export function meetsRequirements(requires: Requirement, caps: Capabilities): boolean {
-  if (requires.tools === true && caps.tools !== true) return false;
-  if (requires.vision === true && caps.vision !== true) return false;
-  if (requires.json === true && caps.json !== true) return false;
-  if (requires.min_context !== undefined && (caps.context_length === null || caps.context_length < requires.min_context)) return false;
-  return true;
+export function meetsRequirements(req: Requirement, modelCaps: Capabilities): boolean {
+  if (req.tools === true && modelCaps.tools !== true) return false;
+  if (req.vision === true && modelCaps.vision !== true) return false;
+  if (req.json === true && modelCaps.json !== true) return false;
+  if (req.min_context !== undefined && (modelCaps.context_length === null || modelCaps.context_length < req.min_context)) return false;
+  return true; // all constraints satisfied
 }
 
-function zeroPriced(v: Json): boolean | null {
-  const pricing = isRecord(v.pricing) ? v.pricing : null;
-  if (pricing === null) return null;
-  const values = Object.values(pricing).flatMap((x) => {
-    if (typeof x === 'number') return [x];
-    if (typeof x === 'string' && x.trim() !== '') return [Number(x)];
+function isZeroPricing(rawObj: Json): boolean | null {
+  const priceMap = isRecord(rawObj.pricing) ? rawObj.pricing : null;
+  if (priceMap === null) return null;
+  const nums = Object.values(priceMap).flatMap((val) => {
+    if (typeof val === 'number') return [val];
+    if (typeof val === 'string' && val.trim() !== '') return [Number(val)];
     return [];
   });
-  if (values.length === 0) return null;
-  return values.every((n) => Number.isFinite(n) && n === 0);
+  if (nums.length === 0) return null;
+  return nums.every((num) => Number.isFinite(num) && num === 0);
 }
 
-function modelIn(wire: Wire, v: unknown): ProbedModel | null {
-  if (!isRecord(v)) return null;
-  const id = wire === 'gemini' ? stringOf(v.name).replace(/^models\//, '') : stringOf(v.id);
-  if (id === '') return null;
-  const context = numberOrNull(v.context_length) ?? numberOrNull(v.context_window) ?? numberOrNull(v.inputTokenLimit);
+function decodeProbedModel(wireKind: Wire, rawItem: unknown): ProbedModel | null {
+  if (!isRecord(rawItem)) return null;
+  const modelId = wireKind === 'gemini' ? asStr(rawItem.name).replace(/^models\//, '') : asStr(rawItem.id);
+  if (modelId === '') return null;
+  const ctxWindow = asNum(rawItem.context_length) ?? asNum(rawItem.context_window) ?? asNum(rawItem.inputTokenLimit);
+  const label = asStr(rawItem.display_name) || asStr(rawItem.displayName) || modelId;
   return {
-    id,
-    display_name: stringOf(v.display_name) !== '' ? stringOf(v.display_name) : stringOf(v.displayName) !== '' ? stringOf(v.displayName) : id,
-    free: boolOrNull(v.free) ?? zeroPriced(v),
-    context_length: context,
-    tools: boolOrNull(v.tools),
-    vision: boolOrNull(v.vision),
-    json: boolOrNull(v.json),
+    id: modelId,
+    display_name: label,
+    free: asBool(rawItem.free) ?? isZeroPricing(rawItem),
+    context_length: ctxWindow,
+    tools: asBool(rawItem.tools),
+    vision: asBool(rawItem.vision),
+    json: asBool(rawItem.json),
   };
 }
 
-function modelsIn(wire: Wire, body: unknown): ProbedModel[] {
-  if (!isRecord(body)) return [];
-  const list = wire === 'gemini' ? body.models : body.data;
-  if (!Array.isArray(list)) return [];
-  return list.flatMap((v) => {
-    const m = modelIn(wire, v);
-    return m === null ? [] : [m];
+function extractModelList(wireKind: Wire, payloadBody: unknown): ProbedModel[] {
+  if (!isRecord(payloadBody)) return [];
+  const rawArr = wireKind === 'gemini' ? payloadBody.models : payloadBody.data;
+  if (!Array.isArray(rawArr)) return [];
+  return rawArr.flatMap((entry) => {
+    const parsed = decodeProbedModel(wireKind, entry);
+    return parsed === null ? [] : [parsed];
   });
 }
 
 export async function probeProvider(
-  envUrl: string,
-  provider: ProviderDirectoryEntry,
+  envOrigin: string,
+  provEntry: ProviderDirectoryEntry,
   timeoutMs = 5000,
-  ratings: RatingsFile | null = null,
+  ratingsFile: RatingsFile | null = null,
 ): Promise<Probe> {
-  if (envUrl.trim() === '' && ratings !== null) {
-    const models: ProbedModel[] = ratings.ratings
-      .filter((r) => r.provider === provider.id)
-      .map((r) => ({
-        id: r.model,
-        display_name: r.model,
-        free: r.free,
-        context_length: r.context_length,
-        tools: r.tools,
-        vision: r.vision,
-        json: r.json,
+  if (envOrigin.trim() === '' && ratingsFile !== null) {
+    const fallbackModels: ProbedModel[] = ratingsFile.ratings
+      .filter((row) => row.provider === provEntry.id)
+      .map((row) => ({
+        id: row.model,
+        display_name: row.model,
+        free: row.free,
+        context_length: row.context_length,
+        tools: row.tools,
+        vision: row.vision,
+        json: row.json,
       }));
-    return { provider, ok: true, status: 200, models, error: null };
+    return { provider: provEntry, ok: true, status: 200, models: fallbackModels, error: null };
   }
-  const base = joinBase(envUrl, provider.base);
-  const url = provider.wire === 'gemini' ? `${base}/v1beta/models` : `${base}/v1/models`;
-  const headers: Record<string, string> = { accept: 'application/json', ...authHeaders(provider.auth, provider.key) };
-  if (provider.wire === 'anthropic') headers['anthropic-version'] = '2023-06-01';
+  const baseEndpoint = joinBase(envOrigin, provEntry.base);
+  const modelsUrl = provEntry.wire === 'gemini' ? `${baseEndpoint}/v1beta/models` : `${baseEndpoint}/v1/models`;
+  const reqHeaders: Record<string, string> = { accept: 'application/json', ...authHeaders(provEntry.auth, provEntry.key) };
+  if (provEntry.wire === 'anthropic') reqHeaders['anthropic-version'] = '2023-06-01';
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) return { provider, ok: false, status: res.status, models: [], error: `GET ${url} answered HTTP ${res.status}` };
-    const body: unknown = await res.json();
-    return { provider, ok: true, status: res.status, models: modelsIn(provider.wire, body), error: null };
+    const httpRes = await fetch(modelsUrl, { headers: reqHeaders, signal: AbortSignal.timeout(timeoutMs) });
+    if (!httpRes.ok) return { provider: provEntry, ok: false, status: httpRes.status, models: [], error: `GET ${modelsUrl} answered HTTP ${httpRes.status}` };
+    const jsonPayload: unknown = await httpRes.json();
+    return { provider: provEntry, ok: true, status: httpRes.status, models: extractModelList(provEntry.wire, jsonPayload), error: null };
   } catch (err) {
-    return { provider, ok: false, status: 0, models: [], error: `GET ${url} failed: ${(err as Error).message}` };
+    return { provider: provEntry, ok: false, status: 0, models: [], error: `GET ${modelsUrl} failed: ${(err as Error).message}` };
   }
 }
 
-export function buildCatalog(_envUrl: string, probes: readonly Probe[], ratings: RatingsFile | null): CatalogReport {
-  const providers: CatalogProvider[] = [];
-  for (const probe of probes) {
-    if (!probe.ok) continue;
-    const seen = new Set<string>();
-    const models: CatalogModel[] = [];
-    for (const model of [...probe.models].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
-      if (seen.has(model.id)) continue;
-      seen.add(model.id);
-      const row = ratingOfModel(ratings, probe.provider.id, model.id);
-      models.push({ id: model.id, free: modelFree(model, row), context_length: row?.context_length ?? model.context_length ?? null });
+export function buildCatalog(_envOrigin: string, probeResults: readonly Probe[], ratingsFile: RatingsFile | null): CatalogReport {
+  const catalogProviders: CatalogProvider[] = [];
+  for (const probeItem of probeResults) {
+    if (!probeItem.ok) continue; // skip failed probes
+    const seenIds = new Set<string>();
+    const catalogModels: CatalogModel[] = [];
+    for (const mdl of [...probeItem.models].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
+      if (seenIds.has(mdl.id)) continue;
+      seenIds.add(mdl.id);
+      const rateRow = ratingOfModel(ratingsFile, probeItem.provider.id, mdl.id);
+      catalogModels.push({ id: mdl.id, free: modelFree(mdl, rateRow), context_length: rateRow?.context_length ?? mdl.context_length ?? null });
     }
-    providers.push({ id: probe.provider.id, base_url: probe.provider.base, key_env: probe.provider.key_env, wire: probe.provider.wire, models });
+    catalogProviders.push({ id: probeItem.provider.id, base_url: probeItem.provider.base, key_env: probeItem.provider.key_env, wire: probeItem.provider.wire, models: catalogModels });
   }
-  return { providers };
+  return { providers: catalogProviders };
 }

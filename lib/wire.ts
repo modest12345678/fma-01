@@ -1,414 +1,409 @@
-import { isRecord, type Json, type Wire } from './providers.ts';
+import { isRecord, type Json, type Wire } from './providers.ts'; // wire protocol helpers
 
 export interface ServedModel {
-  id: string;
-  provider: string;
-  display_name: string;
+  id: string; // served model identifier
+  provider: string; // owning provider id
+  display_name: string; // model display title
 }
 
-const FIXED_OPENAI_CREATED = 1767225600;
-const FIXED_ANTHROPIC_CREATED_AT = '2026-01-01T00:00:00Z';
+const CREATED_EPOCH_SEC = 1767225600; // deterministic openai timestamp
+const CREATED_ISO_STR = '2026-01-01T00:00:00Z'; // deterministic anthropic timestamp
 
-export function openAIModelList(models: readonly ServedModel[]): Json {
+export function openAIModelList(servedList: readonly ServedModel[]): Json {
   return {
-    object: 'list',
-    data: models.map((m) => ({ id: m.id, object: 'model', created: FIXED_OPENAI_CREATED, owned_by: m.provider })),
+    object: 'list', // openai list envelope
+    data: servedList.map((item) => ({ id: item.id, object: 'model', created: CREATED_EPOCH_SEC, owned_by: item.provider })),
   };
 }
 
-export function anthropicModelList(models: readonly ServedModel[]): Json {
+export function anthropicModelList(servedList: readonly ServedModel[]): Json {
   return {
-    data: models.map((m) => ({ type: 'model', id: m.id, display_name: m.display_name, created_at: FIXED_ANTHROPIC_CREATED_AT })),
-    has_more: false,
+    data: servedList.map((item) => ({ type: 'model', id: item.id, display_name: item.display_name, created_at: CREATED_ISO_STR })),
+    has_more: false, // complete single-page list
   };
 }
 
-export function anthropicError(type: string, message: string): Json {
-  return { type: 'error', error: { type, message } };
+export function anthropicError(errKind: string, errMsg: string): Json {
+  return { type: 'error', error: { type: errKind, message: errMsg } }; // anthropic error shape
 }
 
-export function openAIError(message: string, type: string, code: string | null): Json {
-  return { error: { message, type, code } };
+export function openAIError(errMsg: string, errKind: string, errCode: string | null): Json {
+  return { error: { message: errMsg, type: errKind, code: errCode } }; // openai error shape
 }
 
 export interface NormalizedImage {
-  kind: 'base64' | 'url';
-  mediaType: string;
-  data: string;
-  url: string;
+  kind: 'base64' | 'url'; // image encoding mode
+  mediaType: string; // mime media type
+  data: string; // base64 payload bytes
+  url: string; // source image url
 }
 
 export interface NormalizedTool {
-  name: string;
-  description: string;
-  schema: Json;
+  name: string; // function tool name
+  description: string; // tool description text
+  schema: Json; // json schema parameters
 }
 
 export interface NormalizedRequest {
-  api: 'openai' | 'anthropic';
-  stream: boolean;
-  systemText: string;
-  userText: string;
-  images: NormalizedImage[];
-  tools: NormalizedTool[];
-  maxTokens: number | null;
-  stops: string[];
-  jsonMode: boolean;
-  temperature: number | null;
+  api: 'openai' | 'anthropic'; // caller api dialect
+  stream: boolean; // caller requested sse
+  systemText: string; // combined system prompt
+  userText: string; // combined user prompt
+  images: NormalizedImage[]; // extracted vision inputs
+  tools: NormalizedTool[]; // extracted tool declarations
+  maxTokens: number | null; // output token cap
+  stops: string[]; // custom stop strings
+  jsonMode: boolean; // structured json mode
+  temperature: number | null; // sampling temperature
 }
 
-export type StopFamily = 'stop' | 'length' | 'tools' | 'filter';
+export type StopFamily = 'stop' | 'length' | 'tools' | 'filter'; // canonical finish category
 
 export interface NormalizedAnswer {
-  text: string;
-  stopFamily: StopFamily;
-  inputTokens: number;
-  outputTokens: number;
+  text: string; // assistant text reply
+  stopFamily: StopFamily; // normalized finish reason
+  inputTokens: number; // prompt token count
+  outputTokens: number; // completion token count
 }
 
-function blocksText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const block of content) {
-    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+function extractTextBlocks(rawContent: unknown): string {
+  if (typeof rawContent === 'string') return rawContent;
+  if (!Array.isArray(rawContent)) return '';
+  const textFragments: string[] = [];
+  for (const part of rawContent) {
+    if (isRecord(part) && part.type === 'text' && typeof part.text === 'string') textFragments.push(part.text);
   }
-  return parts.join('\n');
+  return textFragments.join('\n');
 }
 
-function numberOrNull(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+const finiteNum = (val: unknown): number | null => (typeof val === 'number' && Number.isFinite(val) ? val : null);
+
+function toStrArray(val: unknown): string[] {
+  if (typeof val === 'string') return [val];
+  if (!Array.isArray(val)) return [];
+  return val.filter((entry): entry is string => typeof entry === 'string');
 }
 
-function stringList(v: unknown): string[] {
-  if (typeof v === 'string') return [v];
-  if (!Array.isArray(v)) return [];
-  return v.filter((x): x is string => typeof x === 'string');
-}
-
-function parseDataUrl(url: string): NormalizedImage {
-  const m = /^data:([^;,]*);base64,(.*)$/s.exec(url);
-  if (m !== null) {
-    return { kind: 'base64', mediaType: m[1] || 'image/png', data: m[2], url };
+function decodeImageUri(rawUri: string): NormalizedImage {
+  const matchData = /^data:([^;,]*);base64,(.*)$/s.exec(rawUri);
+  if (matchData !== null) {
+    return { kind: 'base64', mediaType: matchData[1] || 'image/png', data: matchData[2], url: rawUri };
   }
-  return { kind: 'url', mediaType: 'image/png', data: '', url };
+  return { kind: 'url', mediaType: 'image/png', data: '', url: rawUri };
 }
 
-export function parseClientRequest(api: 'openai' | 'anthropic', body: Json): NormalizedRequest {
-  if (api === 'openai') {
-    const messages = Array.isArray(body.messages) ? body.messages.filter(isRecord) : [];
-    const systemParts: string[] = [];
-    let userText = '';
-    const images: NormalizedImage[] = [];
-    for (const msg of messages) {
-      if (msg.role === 'system') {
-        const text = blocksText(msg.content);
-        if (text !== '') systemParts.push(text);
-      } else if (msg.role === 'user') {
-        userText = blocksText(msg.content);
-        if (Array.isArray(msg.content)) {
-          for (const block of msg.content) {
-            if (!isRecord(block)) continue;
-            if (block.type === 'image_url' && isRecord(block.image_url) && typeof block.image_url.url === 'string' && block.image_url.url !== '') {
-              images.push(parseDataUrl(block.image_url.url));
+export function parseClientRequest(clientApi: 'openai' | 'anthropic', reqBody: Json): NormalizedRequest {
+  if (clientApi === 'openai') {
+    const msgList = Array.isArray(reqBody.messages) ? reqBody.messages.filter(isRecord) : [];
+    const sysSegments: string[] = [];
+    let usrPrompt = '';
+    const imgAttachments: NormalizedImage[] = [];
+    for (const msgItem of msgList) {
+      if (msgItem.role === 'system') {
+        const sysTxt = extractTextBlocks(msgItem.content);
+        if (sysTxt !== '') sysSegments.push(sysTxt);
+      } else if (msgItem.role === 'user') {
+        usrPrompt = extractTextBlocks(msgItem.content);
+        if (Array.isArray(msgItem.content)) {
+          for (const part of msgItem.content) {
+            if (!isRecord(part)) continue;
+            if (part.type === 'image_url' && isRecord(part.image_url) && typeof part.image_url.url === 'string' && part.image_url.url !== '') {
+              imgAttachments.push(decodeImageUri(part.image_url.url));
             }
           }
         }
       }
     }
-    const tools: NormalizedTool[] = [];
-    if (Array.isArray(body.tools)) {
-      for (const tool of body.tools) {
-        if (isRecord(tool) && isRecord(tool.function) && typeof tool.function.name === 'string') {
-          tools.push({
-            name: tool.function.name,
-            description: typeof tool.function.description === 'string' ? tool.function.description : '',
-            schema: isRecord(tool.function.parameters) ? tool.function.parameters : { type: 'object', properties: {} },
+    const toolSpecs: NormalizedTool[] = [];
+    if (Array.isArray(reqBody.tools)) {
+      for (const rawTool of reqBody.tools) {
+        if (isRecord(rawTool) && isRecord(rawTool.function) && typeof rawTool.function.name === 'string') {
+          toolSpecs.push({
+            name: rawTool.function.name,
+            description: typeof rawTool.function.description === 'string' ? rawTool.function.description : '',
+            schema: isRecord(rawTool.function.parameters) ? rawTool.function.parameters : { type: 'object', properties: {} },
           });
         }
       }
     }
-    const format = isRecord(body.response_format) ? body.response_format.type : undefined;
+    const respFmt = isRecord(reqBody.response_format) ? reqBody.response_format.type : undefined;
     return {
       api: 'openai',
-      stream: body.stream === true,
-      systemText: systemParts.join('\n'),
-      userText,
-      images,
-      tools,
-      maxTokens: numberOrNull(body.max_tokens) ?? numberOrNull(body.max_completion_tokens),
-      stops: stringList(body.stop),
-      jsonMode: format === 'json_object' || format === 'json_schema',
-      temperature: numberOrNull(body.temperature),
+      stream: reqBody.stream === true,
+      systemText: sysSegments.join('\n'),
+      userText: usrPrompt,
+      images: imgAttachments,
+      tools: toolSpecs,
+      maxTokens: finiteNum(reqBody.max_tokens) ?? finiteNum(reqBody.max_completion_tokens),
+      stops: toStrArray(reqBody.stop),
+      jsonMode: respFmt === 'json_object' || respFmt === 'json_schema',
+      temperature: finiteNum(reqBody.temperature),
     };
   }
 
-  // Anthropic client request
-  const systemText = blocksText(body.system);
-  const messages = Array.isArray(body.messages) ? body.messages.filter(isRecord) : [];
-  let userText = '';
-  const images: NormalizedImage[] = [];
-  for (const msg of messages) {
-    if (msg.role !== 'user') continue;
-    userText = blocksText(msg.content);
-    if (Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (!isRecord(block) || block.type !== 'image' || !isRecord(block.source)) continue;
-        const src = block.source;
-        if (src.type === 'base64' && typeof src.data === 'string') {
-          const mediaType = typeof src.media_type === 'string' && src.media_type !== '' ? src.media_type : 'image/png';
-          images.push({ kind: 'base64', mediaType, data: src.data, url: `data:${mediaType};base64,${src.data}` });
-        } else if (src.type === 'url' && typeof src.url === 'string' && src.url !== '') {
-          images.push(parseDataUrl(src.url));
+  const anthSystem = extractTextBlocks(reqBody.system);
+  const anthMsgs = Array.isArray(reqBody.messages) ? reqBody.messages.filter(isRecord) : [];
+  let anthUser = '';
+  const anthImages: NormalizedImage[] = [];
+  for (const msgItem of anthMsgs) {
+    if (msgItem.role !== 'user') continue;
+    anthUser = extractTextBlocks(msgItem.content);
+    if (Array.isArray(msgItem.content)) {
+      for (const part of msgItem.content) {
+        if (!isRecord(part) || part.type !== 'image' || !isRecord(part.source)) continue;
+        const imgSrc = part.source;
+        if (imgSrc.type === 'base64' && typeof imgSrc.data === 'string') {
+          const mimeStr = typeof imgSrc.media_type === 'string' && imgSrc.media_type !== '' ? imgSrc.media_type : 'image/png';
+          anthImages.push({ kind: 'base64', mediaType: mimeStr, data: imgSrc.data, url: `data:${mimeStr};base64,${imgSrc.data}` });
+        } else if (imgSrc.type === 'url' && typeof imgSrc.url === 'string' && imgSrc.url !== '') {
+          anthImages.push(decodeImageUri(imgSrc.url));
         }
       }
     }
   }
-  const tools: NormalizedTool[] = [];
-  if (Array.isArray(body.tools)) {
-    for (const tool of body.tools) {
-      if (isRecord(tool) && typeof tool.name === 'string') {
-        tools.push({
-          name: tool.name,
-          description: typeof tool.description === 'string' ? tool.description : '',
-          schema: isRecord(tool.input_schema) ? tool.input_schema : { type: 'object', properties: {} },
+  const anthTools: NormalizedTool[] = [];
+  if (Array.isArray(reqBody.tools)) {
+    for (const rawTool of reqBody.tools) {
+      if (isRecord(rawTool) && typeof rawTool.name === 'string') {
+        anthTools.push({
+          name: rawTool.name,
+          description: typeof rawTool.description === 'string' ? rawTool.description : '',
+          schema: isRecord(rawTool.input_schema) ? rawTool.input_schema : { type: 'object', properties: {} },
         });
       }
     }
   }
   return {
     api: 'anthropic',
-    stream: body.stream === true,
-    systemText,
-    userText,
-    images,
-    tools,
-    maxTokens: numberOrNull(body.max_tokens),
-    stops: stringList(body.stop_sequences),
+    stream: reqBody.stream === true,
+    systemText: anthSystem,
+    userText: anthUser,
+    images: anthImages,
+    tools: anthTools,
+    maxTokens: finiteNum(reqBody.max_tokens),
+    stops: toStrArray(reqBody.stop_sequences),
     jsonMode: false,
-    temperature: numberOrNull(body.temperature),
+    temperature: finiteNum(reqBody.temperature),
   };
 }
 
-export function buildUpstreamBody(wire: Wire, model: string, req: NormalizedRequest): Json {
-  if (wire === 'openai') {
-    const messages: Json[] = [];
-    if (req.systemText !== '') messages.push({ role: 'system', content: req.systemText });
-    if (req.images.length > 0) {
-      const parts: Json[] = [{ type: 'text', text: req.userText }];
-      for (const img of req.images) {
-        const url = img.kind === 'base64' ? `data:${img.mediaType};base64,${img.data}` : img.url;
-        parts.push({ type: 'image_url', image_url: { url } });
+export function buildUpstreamBody(targetWire: Wire, modelSlug: string, normReq: NormalizedRequest): Json {
+  if (targetWire === 'openai') {
+    const oaiMsgs: Json[] = [];
+    if (normReq.systemText !== '') oaiMsgs.push({ role: 'system', content: normReq.systemText });
+    if (normReq.images.length > 0) {
+      const contentParts: Json[] = [{ type: 'text', text: normReq.userText }];
+      for (const imgItem of normReq.images) {
+        const imgUri = imgItem.kind === 'base64' ? `data:${imgItem.mediaType};base64,${imgItem.data}` : imgItem.url;
+        contentParts.push({ type: 'image_url', image_url: { url: imgUri } });
       }
-      messages.push({ role: 'user', content: parts });
+      oaiMsgs.push({ role: 'user', content: contentParts });
     } else {
-      messages.push({ role: 'user', content: req.userText });
+      oaiMsgs.push({ role: 'user', content: normReq.userText });
     }
-    const out: Json = { model, messages };
-    if (req.maxTokens !== null) out.max_tokens = req.maxTokens;
-    if (req.temperature !== null) out.temperature = req.temperature;
-    if (req.stops.length > 0) out.stop = req.stops;
-    if (req.tools.length > 0) {
-      out.tools = req.tools.map((t) => ({
+    const oaiPayload: Json = { model: modelSlug, messages: oaiMsgs };
+    if (normReq.maxTokens !== null) oaiPayload.max_tokens = normReq.maxTokens;
+    if (normReq.temperature !== null) oaiPayload.temperature = normReq.temperature;
+    if (normReq.stops.length > 0) oaiPayload.stop = normReq.stops;
+    if (normReq.tools.length > 0) {
+      oaiPayload.tools = normReq.tools.map((toolItem) => ({
         type: 'function',
-        function: { name: t.name, description: t.description, parameters: t.schema },
+        function: { name: toolItem.name, description: toolItem.description, parameters: toolItem.schema },
       }));
     }
-    if (req.jsonMode) out.response_format = { type: 'json_object' };
-    return out;
+    if (normReq.jsonMode) oaiPayload.response_format = { type: 'json_object' };
+    return oaiPayload;
   }
 
-  if (wire === 'anthropic') {
-    const content: unknown =
-      req.images.length > 0
+  if (targetWire === 'anthropic') {
+    const userContent: unknown =
+      normReq.images.length > 0
         ? [
-            { type: 'text', text: req.userText },
-            ...req.images.map((img) =>
-              img.kind === 'base64'
-                ? { type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } }
-                : { type: 'image', source: { type: 'url', url: img.url } },
+            { type: 'text', text: normReq.userText },
+            ...normReq.images.map((imgItem) =>
+              imgItem.kind === 'base64'
+                ? { type: 'image', source: { type: 'base64', media_type: imgItem.mediaType, data: imgItem.data } }
+                : { type: 'image', source: { type: 'url', url: imgItem.url } },
             ),
           ]
-        : req.userText;
-    const out: Json = {
-      model,
-      messages: [{ role: 'user', content }],
+        : normReq.userText;
+    const anthPayload: Json = {
+      model: modelSlug,
+      messages: [{ role: 'user', content: userContent }],
     };
-    if (req.systemText !== '') out.system = req.systemText;
-    if (req.maxTokens !== null) out.max_tokens = req.maxTokens;
-    if (req.temperature !== null) out.temperature = req.temperature;
-    if (req.stops.length > 0) out.stop_sequences = req.stops;
-    if (req.tools.length > 0) {
-      out.tools = req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }));
+    if (normReq.systemText !== '') anthPayload.system = normReq.systemText;
+    if (normReq.maxTokens !== null) anthPayload.max_tokens = normReq.maxTokens;
+    if (normReq.temperature !== null) anthPayload.temperature = normReq.temperature;
+    if (normReq.stops.length > 0) anthPayload.stop_sequences = normReq.stops;
+    if (normReq.tools.length > 0) {
+      anthPayload.tools = normReq.tools.map((toolItem) => ({ name: toolItem.name, description: toolItem.description, input_schema: toolItem.schema }));
     }
-    return out;
+    return anthPayload;
   }
 
-  // Gemini upstream wire
-  const parts: Json[] = [{ text: req.userText }];
-  for (const img of req.images) {
-    if (img.kind === 'base64') parts.push({ inlineData: { mimeType: img.mediaType, data: img.data } });
-    else parts.push({ fileData: { fileUri: img.url } });
+  const gemParts: Json[] = [{ text: normReq.userText }];
+  for (const imgItem of normReq.images) {
+    if (imgItem.kind === 'base64') gemParts.push({ inlineData: { mimeType: imgItem.mediaType, data: imgItem.data } });
+    else gemParts.push({ fileData: { fileUri: imgItem.url } });
   }
-  const out: Json = {
-    contents: [{ role: 'user', parts }],
+  const gemPayload: Json = {
+    contents: [{ role: 'user', parts: gemParts }],
   };
-  if (req.systemText !== '') {
-    out.systemInstruction = { parts: [{ text: req.systemText }] };
+  if (normReq.systemText !== '') {
+    gemPayload.systemInstruction = { parts: [{ text: normReq.systemText }] };
   }
-  if (req.tools.length > 0) {
-    out.tools = [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.schema })) }];
+  if (normReq.tools.length > 0) {
+    gemPayload.tools = [{ functionDeclarations: normReq.tools.map((toolItem) => ({ name: toolItem.name, description: toolItem.description, parameters: toolItem.schema })) }];
   }
-  const gc: Json = {};
-  if (req.maxTokens !== null) gc.maxOutputTokens = req.maxTokens;
-  if (req.temperature !== null) gc.temperature = req.temperature;
-  if (req.stops.length > 0) gc.stopSequences = req.stops;
-  if (req.jsonMode) gc.responseMimeType = 'application/json';
-  if (Object.keys(gc).length > 0) out.generationConfig = gc;
-  return out;
+  const genCfg: Json = {};
+  if (normReq.maxTokens !== null) genCfg.maxOutputTokens = normReq.maxTokens;
+  if (normReq.temperature !== null) genCfg.temperature = normReq.temperature;
+  if (normReq.stops.length > 0) genCfg.stopSequences = normReq.stops;
+  if (normReq.jsonMode) genCfg.responseMimeType = 'application/json';
+  if (Object.keys(genCfg).length > 0) gemPayload.generationConfig = genCfg;
+  return gemPayload;
 }
 
-function stopFamilyFrom(reason: unknown): StopFamily {
-  if (reason === 'length' || reason === 'max_tokens' || reason === 'MAX_TOKENS') return 'length';
-  if (reason === 'tool_calls' || reason === 'function_call' || reason === 'tool_use') return 'tools';
-  if (reason === 'content_filter' || reason === 'refusal' || reason === 'SAFETY') return 'filter';
-  return 'stop';
+function classifyStopReason(rawReason: unknown): StopFamily {
+  if (rawReason === 'length' || rawReason === 'max_tokens' || rawReason === 'MAX_TOKENS') return 'length';
+  if (rawReason === 'tool_calls' || rawReason === 'function_call' || rawReason === 'tool_use') return 'tools';
+  if (rawReason === 'content_filter' || rawReason === 'refusal' || rawReason === 'SAFETY') return 'filter';
+  return 'stop'; // default normal completion
 }
 
-export function parseUpstreamAnswer(wire: Wire, body: Json): NormalizedAnswer {
-  if (wire === 'openai') {
-    const choices = Array.isArray(body.choices) ? body.choices : [];
-    const choice = isRecord(choices[0]) ? choices[0] : {};
-    const msg = isRecord(choice.message) ? choice.message : {};
-    const text = typeof msg.content === 'string' ? msg.content : blocksText(msg.content);
-    const usage = isRecord(body.usage) ? body.usage : {};
+export function parseUpstreamAnswer(sourceWire: Wire, respBody: Json): NormalizedAnswer {
+  if (sourceWire === 'openai') {
+    const choiceArr = Array.isArray(respBody.choices) ? respBody.choices : [];
+    const firstChoice = isRecord(choiceArr[0]) ? choiceArr[0] : {};
+    const msgObj = isRecord(firstChoice.message) ? firstChoice.message : {};
+    const answerTxt = typeof msgObj.content === 'string' ? msgObj.content : extractTextBlocks(msgObj.content);
+    const usageObj = isRecord(respBody.usage) ? respBody.usage : {};
     return {
-      text,
-      stopFamily: stopFamilyFrom(choice.finish_reason),
-      inputTokens: numberOrNull(usage.prompt_tokens) ?? 0,
-      outputTokens: numberOrNull(usage.completion_tokens) ?? 0,
+      text: answerTxt,
+      stopFamily: classifyStopReason(firstChoice.finish_reason),
+      inputTokens: finiteNum(usageObj.prompt_tokens) ?? 0,
+      outputTokens: finiteNum(usageObj.completion_tokens) ?? 0,
     };
   }
 
-  if (wire === 'anthropic') {
-    const text = blocksText(body.content);
-    const usage = isRecord(body.usage) ? body.usage : {};
+  if (sourceWire === 'anthropic') {
+    const answerTxt = extractTextBlocks(respBody.content);
+    const usageObj = isRecord(respBody.usage) ? respBody.usage : {};
     return {
-      text,
-      stopFamily: stopFamilyFrom(body.stop_reason),
-      inputTokens: numberOrNull(usage.input_tokens) ?? 0,
-      outputTokens: numberOrNull(usage.output_tokens) ?? 0,
+      text: answerTxt,
+      stopFamily: classifyStopReason(respBody.stop_reason),
+      inputTokens: finiteNum(usageObj.input_tokens) ?? 0,
+      outputTokens: finiteNum(usageObj.output_tokens) ?? 0,
     };
   }
 
-  // Gemini upstream response
-  const candidates = Array.isArray(body.candidates) ? body.candidates : [];
-  const cand = isRecord(candidates[0]) ? candidates[0] : {};
-  const content = isRecord(cand.content) ? cand.content : {};
-  const parts = Array.isArray(content.parts) ? content.parts : [];
-  const texts: string[] = [];
-  for (const part of parts) {
-    if (isRecord(part) && typeof part.text === 'string') texts.push(part.text);
+  const candArr = Array.isArray(respBody.candidates) ? respBody.candidates : [];
+  const firstCand = isRecord(candArr[0]) ? candArr[0] : {};
+  const candContent = isRecord(firstCand.content) ? firstCand.content : {};
+  const candParts = Array.isArray(candContent.parts) ? candContent.parts : [];
+  const textChunks: string[] = [];
+  for (const partItem of candParts) {
+    if (isRecord(partItem) && typeof partItem.text === 'string') textChunks.push(partItem.text);
   }
-  const meta = isRecord(body.usageMetadata) ? body.usageMetadata : {};
+  const gemMeta = isRecord(respBody.usageMetadata) ? respBody.usageMetadata : {};
   return {
-    text: texts.join('\n'),
-    stopFamily: stopFamilyFrom(cand.finishReason),
-    inputTokens: numberOrNull(meta.promptTokenCount) ?? 0,
-    outputTokens: numberOrNull(meta.candidatesTokenCount) ?? 0,
+    text: textChunks.join('\n'),
+    stopFamily: classifyStopReason(firstCand.finishReason),
+    inputTokens: finiteNum(gemMeta.promptTokenCount) ?? 0,
+    outputTokens: finiteNum(gemMeta.candidatesTokenCount) ?? 0,
   };
 }
 
-const OPENAI_STOP: Record<StopFamily, string> = {
-  stop: 'stop',
-  length: 'length',
-  tools: 'tool_calls',
-  filter: 'content_filter',
+const OAI_FINISH_MAP: Record<StopFamily, string> = {
+  stop: 'stop', // oai stop reason
+  length: 'length', // oai length reason
+  tools: 'tool_calls', // oai tool reason
+  filter: 'content_filter', // oai filter reason
 };
 
-const ANTHROPIC_STOP: Record<StopFamily, string> = {
-  stop: 'end_turn',
-  length: 'max_tokens',
-  tools: 'tool_use',
-  filter: 'refusal',
+const ANTH_FINISH_MAP: Record<StopFamily, string> = {
+  stop: 'end_turn', // anthropic end_turn
+  length: 'max_tokens', // anthropic max_tokens
+  tools: 'tool_use', // anthropic tool_use
+  filter: 'refusal', // anthropic refusal
 };
 
-export function emitClientJson(api: 'openai' | 'anthropic', ans: NormalizedAnswer, model: string): Json {
-  if (api === 'openai') {
+export function emitClientJson(clientApi: 'openai' | 'anthropic', normAns: NormalizedAnswer, modelSlug: string): Json {
+  if (clientApi === 'openai') {
     return {
-      id: 'chatcmpl-agg',
-      object: 'chat.completion',
-      created: FIXED_OPENAI_CREATED,
-      model,
-      choices: [{ index: 0, message: { role: 'assistant', content: ans.text }, finish_reason: OPENAI_STOP[ans.stopFamily], logprobs: null }],
-      usage: { prompt_tokens: ans.inputTokens, completion_tokens: ans.outputTokens, total_tokens: ans.inputTokens + ans.outputTokens },
+      id: 'chatcmpl-agg', // deterministic completion id
+      object: 'chat.completion', // openai completion object
+      created: CREATED_EPOCH_SEC,
+      model: modelSlug,
+      choices: [{ index: 0, message: { role: 'assistant', content: normAns.text }, finish_reason: OAI_FINISH_MAP[normAns.stopFamily], logprobs: null }],
+      usage: { prompt_tokens: normAns.inputTokens, completion_tokens: normAns.outputTokens, total_tokens: normAns.inputTokens + normAns.outputTokens },
     };
   }
   return {
-    id: 'msg_agg',
-    type: 'message',
-    role: 'assistant',
-    model,
-    content: [{ type: 'text', text: ans.text }],
-    stop_reason: ANTHROPIC_STOP[ans.stopFamily],
+    id: 'msg_agg', // deterministic message id
+    type: 'message', // anthropic message object
+    role: 'assistant', // assistant role
+    model: modelSlug,
+    content: [{ type: 'text', text: normAns.text }],
+    stop_reason: ANTH_FINISH_MAP[normAns.stopFamily],
     stop_sequence: null,
-    usage: { input_tokens: ans.inputTokens, output_tokens: ans.outputTokens },
+    usage: { input_tokens: normAns.inputTokens, output_tokens: normAns.outputTokens },
   };
 }
 
-function sseFrame(event: string | null, data: unknown): string {
-  return `${event === null ? '' : `event: ${event}\n`}data: ${JSON.stringify(data)}\n\n`;
+function formatSseEvent(eventName: string | null, payloadData: unknown): string {
+  return `${eventName === null ? '' : `event: ${eventName}\n`}data: ${JSON.stringify(payloadData)}\n\n`;
 }
 
-export function emitClientSse(api: 'openai' | 'anthropic', ans: NormalizedAnswer, model: string): string {
-  if (api === 'openai') {
-    const chunk = (delta: Json, finish: string | null): Json => ({
+export function emitClientSse(clientApi: 'openai' | 'anthropic', normAns: NormalizedAnswer, modelSlug: string): string {
+  if (clientApi === 'openai') {
+    const buildDeltaChunk = (deltaObj: Json, finishReason: string | null): Json => ({
       id: 'chatcmpl-agg',
       object: 'chat.completion.chunk',
-      created: FIXED_OPENAI_CREATED,
-      model,
-      choices: [{ index: 0, delta, finish_reason: finish }],
+      created: CREATED_EPOCH_SEC,
+      model: modelSlug,
+      choices: [{ index: 0, delta: deltaObj, finish_reason: finishReason }],
     });
-    const frames = [
-      sseFrame(null, chunk({ role: 'assistant', content: '' }, null)),
-      sseFrame(null, chunk({ content: ans.text }, null)),
-      sseFrame(null, chunk({}, OPENAI_STOP[ans.stopFamily])),
-      sseFrame(null, {
+    const oaiFrames = [
+      formatSseEvent(null, buildDeltaChunk({ role: 'assistant', content: '' }, null)),
+      formatSseEvent(null, buildDeltaChunk({ content: normAns.text }, null)),
+      formatSseEvent(null, buildDeltaChunk({}, OAI_FINISH_MAP[normAns.stopFamily])),
+      formatSseEvent(null, {
         id: 'chatcmpl-agg',
         object: 'chat.completion.chunk',
-        created: FIXED_OPENAI_CREATED,
-        model,
+        created: CREATED_EPOCH_SEC,
+        model: modelSlug,
         choices: [],
-        usage: { prompt_tokens: ans.inputTokens, completion_tokens: ans.outputTokens, total_tokens: ans.inputTokens + ans.outputTokens },
+        usage: { prompt_tokens: normAns.inputTokens, completion_tokens: normAns.outputTokens, total_tokens: normAns.inputTokens + normAns.outputTokens },
       }),
       'data: [DONE]\n\n',
     ];
-    return frames.join('');
+    return oaiFrames.join('');
   }
 
-  const frames = [
-    sseFrame('message_start', {
+  const anthFrames = [
+    formatSseEvent('message_start', {
       type: 'message_start',
       message: {
         id: 'msg_agg',
         type: 'message',
         role: 'assistant',
-        model,
+        model: modelSlug,
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: ans.inputTokens, output_tokens: 0 },
+        usage: { input_tokens: normAns.inputTokens, output_tokens: 0 },
       },
     }),
-    sseFrame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
-    sseFrame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ans.text } }),
-    sseFrame('content_block_stop', { type: 'content_block_stop', index: 0 }),
-    sseFrame('message_delta', {
+    formatSseEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    formatSseEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: normAns.text } }),
+    formatSseEvent('content_block_stop', { type: 'content_block_stop', index: 0 }),
+    formatSseEvent('message_delta', {
       type: 'message_delta',
-      delta: { stop_reason: ANTHROPIC_STOP[ans.stopFamily], stop_sequence: null },
-      usage: { output_tokens: ans.outputTokens },
+      delta: { stop_reason: ANTH_FINISH_MAP[normAns.stopFamily], stop_sequence: null },
+      usage: { output_tokens: normAns.outputTokens },
     }),
-    sseFrame('message_stop', { type: 'message_stop' }),
+    formatSseEvent('message_stop', { type: 'message_stop' }),
   ];
-  return frames.join('');
+  return anthFrames.join('');
 }
